@@ -1,0 +1,6 @@
+path: datasets\night_face
+train: images/train
+val: images/val
+names:
+  0: nose_mouth
+nc: 1
