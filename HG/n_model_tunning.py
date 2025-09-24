@@ -1,4 +1,4 @@
-# train_night_face.py
+# train_night_nosemouth.py (YOLO11n, 소물체·야간 보수 세팅 + 고정 검증 + 스윕)
 import argparse
 import json
 import os
@@ -8,182 +8,139 @@ from pathlib import Path
 import yaml
 from ultralytics import YOLO
 
-
-# ===== 기본 설정 =====
-DATA_ROOT = Path("datasets/night_face")
-YAML_PATH = DATA_ROOT / "night_face.yaml"
+# ==== 기본 ====
 RUN_NAME_PREFIX = "night_smallobj"
-BASE_WEIGHTS = "yolov8n.pt"         # 필요시 외부 가중치 경로로 바꿔도 됨
-CLASSES = ["nose_mouth"]            # 단일 클래스
-DEFAULT_IMGSZ = 960                 # 작은 객체 → 해상도 ↑
-DEFAULT_DEVICE = None               # None이면 자동 감지(없으면 cpu)
+DEFAULT_IMGSZ = 960
+BASE_WEIGHTS = "yolo11n.pt"   # 필요시 yolov8s.pt 등으로 교체 가능
 
+# ==== 유틸 ====
+def ts_name() -> str:
+    return f"{RUN_NAME_PREFIX}-{datetime.now().strftime('%y%m%d-%H%M%S')}"
 
-# ===== 유틸 =====
-def _natural_int(v: str) -> int:
-    v = int(v)
-    if v <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return v
-
-
-def now_run_name() -> str:
-    ts = datetime.now().strftime("%y%m%d-%H%M%S")
-    return f"{RUN_NAME_PREFIX}-{ts}"
-
-
-def write_yaml():
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    content = {
-        "path": str(DATA_ROOT),
-        "train": "images/train",
-        "val": "images/val",
-        "names": {0: CLASSES[0]},
+def make_yaml(data_dir: Path) -> Path:
+    data_dir = data_dir.resolve()
+    yaml_path = data_dir / "night_face.yaml"
+    cfg = {
+        "path": str(data_dir),  # 절대경로
+        "train": str((data_dir / "images/train").resolve()),
+        "val":   str((data_dir / "images/val").resolve()),
+        "names": {0: "nose_mouth"},
         "nc": 1,
     }
-    YAML_PATH.write_text(yaml.safe_dump(content, allow_unicode=True, sort_keys=False))
-    print(f"[OK] wrote {YAML_PATH}")
+    yaml_path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return yaml_path
 
+def scan_counts(data_dir: Path):
+    p = data_dir
+    exts = ("*.jpg","*.jpeg","*.png","*.bmp")
+    def nimg(d): return sum(len(list((d).glob(e))) for e in exts)
+    def nlab(d): return len(list(d.glob("*.txt")))
+    return {
+        "train_imgs": nimg(p/"images/train"),
+        "val_imgs":   nimg(p/"images/val"),
+        "train_labels": nlab(p/"labels/train"),
+        "val_labels":   nlab(p/"labels/val"),
+    }
 
-def count_files():
-    def nimg(p: Path) -> int:
-        return sum(len(list((p).glob(ext))) for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp"))
-    def nlab(p: Path) -> int:
-        return len(list(p.glob("*.txt")))
-
-    tr_img = nimg(DATA_ROOT / "images/train")
-    va_img = nimg(DATA_ROOT / "images/val")
-    tr_lab = nlab(DATA_ROOT / "labels/train")
-    va_lab = nlab(DATA_ROOT / "labels/val")
-    stats = {"train_imgs": tr_img, "val_imgs": va_img, "train_labels": tr_lab, "val_labels": va_lab}
-    print("[DATA] ", stats)
-    return stats
-
-
-def quick_check(strict_labels=True):
-    req = [
-        DATA_ROOT / "images/train",
-        DATA_ROOT / "images/val",
-        DATA_ROOT / "labels/train",
-        DATA_ROOT / "labels/val",
-    ]
-    miss = [str(p) for p in req if not p.exists()]
-    if miss:
-        raise SystemExit("[ERR] 아래 경로가 없습니다:\n- " + "\n- ".join(miss))
-
-    stats = count_files()
-    if strict_labels and stats["train_labels"] == 0:
-        raise SystemExit("[ERR] labels/train/*.txt 라벨이 1개도 없습니다. 최소 1개 이상 필요합니다.")
-    if stats["train_imgs"] == 0 or stats["val_imgs"] == 0:
-        raise SystemExit("[ERR] 이미지가 부족합니다. train/val 이미지가 모두 1장 이상 필요합니다.")
-
-
-def auto_device(dev_arg: str | None):
-    if dev_arg is not None:
-        return dev_arg
-    # CUDA가 없으면 자동으로 cpu
+def auto_device(dev: str | None) -> str:
+    if dev is not None:
+        return dev
     try:
         import torch
-        if torch.cuda.is_available():
-            return "0"  # 첫 GPU
+        return "0" if torch.cuda.is_available() else "cpu"
     except Exception:
-        pass
-    return "cpu"
+        return "cpu"
 
-
-# ===== 서브커맨드 =====
-def cmd_prepare(_args):
-    write_yaml()
-    quick_check(strict_labels=False)
-    print("[OK] prepare done.")
-
-
+# ==== 커맨드 ====
 def cmd_train(args):
-    write_yaml()
-    quick_check(strict_labels=True)
+    os.environ["WANDB_MODE"] = "disabled"
+    data_dir = Path(args.data_dir)
 
+    # 필수 경로 체크
+    req = [data_dir/"images/train", data_dir/"images/val", data_dir/"labels/train", data_dir/"labels/val"]
+    miss = [str(r) for r in req if not r.exists()]
+    if miss:
+        raise SystemExit("[ERR] 경로 없음:\n- " + "\n- ".join(miss))
+
+    stats = scan_counts(data_dir)
+    if stats["train_imgs"] == 0 or stats["val_imgs"] == 0 or stats["train_labels"] == 0:
+        raise SystemExit(f"[ERR] 데이터 부족/라벨 0\n{stats}")
+
+    yaml_path = make_yaml(data_dir)
     device = auto_device(args.device)
-    run_name = args.name or now_run_name()
+    run_name = args.name or ts_name()
 
-    # 베이스 가중치 선택: --weights가 주어지면 우선 사용
-    model_path = args.weights or BASE_WEIGHTS
-    model = YOLO(model_path)
+    model = YOLO(args.weights or BASE_WEIGHTS)
+    print("[INFO] training start...")
 
-    print("[INFO] training...")
+    # 기본(보수) 세팅
     overrides = dict(
-        data=str(YAML_PATH),
+        data=str(yaml_path),
         imgsz=args.imgsz,
         epochs=args.epochs,
         batch=args.batch,
         device=device,
         project="runs/detect",
         name=run_name,
-        exist_ok=True,        # 동일 이름 허용
+        exist_ok=True,
         workers=args.workers,
         patience=args.patience,
         seed=args.seed,
-        # 저장/로그 강화
-        save=True,
-        save_period=1,        # ✅ 매 에폭 저장 → 최소 last는 항상 생성
-        plots=True,           # 학습 곡선 이미지 저장
-        val=True,
-        save_json=False,
+        save=True, save_period=1, plots=True, val=True, save_json=False,
         cos_lr=True,
-        # 작은 객체 친화 설정
-        multi_scale=True,
-        mosaic=1.0,
-        close_mosaic=10,
-        mixup=0.0,
-        copy_paste=0.0,
-        hsv_v=0.6,
-        fliplr=0.5,
-        degrees=5.0, translate=0.05, scale=0.5,
-        # 손실 가중치(단일 클래스)
-        box=8.0, cls=0.2, dfl=1.5,
-        amp=False,            # 환경 호환
-    )
-    results = model.train(**overrides)
 
-    # 저장 경로 안내
+        # 증강/도메인
+        multi_scale=True,              # 다양한 스케일
+        mosaic=0.3, close_mosaic=10,   # 강도↓, 막판 10epoch 끔
+        mixup=0.0, copy_paste=0.0,
+        hsv_h=0.0, hsv_s=0.1, hsv_v=0.6,
+        fliplr=0.5, flipud=0.0,
+        degrees=0.0, translate=0.05, scale=0.1, shear=0.0,
+
+        # 손실 가중 (회귀 비중↑)
+        box=8.0, cls=0.2, dfl=1.5,
+
+        # 최적화
+        lr0=0.005, lrf=0.1, weight_decay=0.0002,
+        amp=True,
+    )
+
+    # 초-보수 프로파일(소물체/야간 특화) 토글
+    if args.strict_smallobj:
+        overrides.update({
+            "multi_scale": False,
+            "mosaic": 0.0, "close_mosaic": 0,
+            "mixup": 0.0, "copy_paste": 0.0,
+            "hsv_h": 0.0, "hsv_s": 0.05, "hsv_v": 0.3,
+            "fliplr": 0.5, "flipud": 0.0,
+            "degrees": 0.0, "translate": 0.02, "scale": 0.0, "shear": 0.0,
+        })
+
+    results = model.train(**overrides)
     save_dir = getattr(results, "save_dir", None)
     print(f"[OK] train done. save_dir={save_dir or f'runs/detect/{run_name}'}")
-    print(f"[TIP] best.pt/last.pt는 위 경로의 weights/ 폴더에 저장됩니다.")
-
-
-def cmd_resume(args):
-    # Ultralytics는 run_dir 지정으로 resume 가능
-    run_dir = Path(args.run_dir)
-    if not run_dir.exists():
-        raise SystemExit(f"[ERR] run_dir가 없습니다: {run_dir}")
-    device = auto_device(args.device)
-    model = YOLO(run_dir / "weights" / "last.pt")
-    print("[INFO] resuming...")
-    results = model.train(resume=True, device=device)
-    print("[OK] resume done.", getattr(results, "save_dir", run_dir))
-
-
-def _resolve_weights(args) -> Path:
-    # 명시한 가중치 우선, 아니면 최근 run의 best→last 순으로 탐색
-    if args.weights:
-        w = Path(args.weights)
-        if not w.exists():
-            raise SystemExit(f"[ERR] 지정한 가중치가 없음: {w}")
-        return w
-    # 최근 생성된 RUN_NAME_PREFIX 디렉터리 탐색
-    root = Path("runs/detect")
-    cand = sorted([p for p in root.glob(f"{RUN_NAME_PREFIX}-*") if (p / "weights").exists()], key=os.path.getmtime, reverse=True)
-    if not cand:
-        raise SystemExit("[ERR] 가중치를 찾지 못했습니다. --weights로 명시해 주세요.")
-    best = cand[0] / "weights" / "best.pt"
-    last = cand[0] / "weights" / "last.pt"
-    return best if best.exists() else last
-
+    print("[TIP] weights는 위 경로의 weights/{best.pt,last.pt}")
 
 def cmd_predict(args):
+    os.environ["WANDB_MODE"] = "disabled"
     device = auto_device(args.device)
-    ckpt = _resolve_weights(args)
-    model = YOLO(str(ckpt))
-    print(f"[INFO] predict: src={args.source}, weights={ckpt}, device={device}")
+    weights = args.weights
+
+    if not weights:
+        root = Path("runs/detect")
+        cands = sorted([p for p in root.glob(f"{RUN_NAME_PREFIX}-*") if (p/"weights").exists()],
+                       key=os.path.getmtime, reverse=True)
+        if not cands:
+            raise SystemExit("[ERR] --weights 미지정 & 최근 run 없음")
+        best = cands[0]/"weights"/"best.pt"
+        last = cands[0]/"weights"/"last.pt"
+        weights = str(best if best.exists() else last)
+    else:
+        if not Path(weights).exists():
+            raise SystemExit(f"[ERR] 가중치 없음: {weights}")
+
+    model = YOLO(weights)
+    print(f"[INFO] predict: weights={weights}")
     model.predict(
         source=args.source,
         imgsz=args.imgsz,
@@ -191,103 +148,140 @@ def cmd_predict(args):
         device=device,
         save=True,
         name=f"{RUN_NAME_PREFIX}_pred",
-        augment=(not args.no_tta),  # TTA 유사
-        iou=0.5,
-        max_det=300,
+        iou=0.5, max_det=300,
         project="runs/detect",
+        augment=not args.no_tta,
         exist_ok=True,
     )
     print(f"[OK] results -> runs/detect/{RUN_NAME_PREFIX}_pred/")
 
-
 def cmd_validate(args):
+    os.environ["WANDB_MODE"] = "disabled"
+
+    if args.data_dir:
+        yaml_path = make_yaml(Path(args.data_dir))
+    elif args.data_yaml:
+        yaml_path = args.data_yaml
+    else:
+        raise SystemExit("[ERR] --data-dir 또는 --data-yaml 중 하나 필요")
+
     device = auto_device(args.device)
-    ckpt = _resolve_weights(args)
-    model = YOLO(str(ckpt))
-    print(f"[INFO] validate: weights={ckpt}")
+    if not Path(args.weights).exists():
+        raise SystemExit(f"[ERR] weights 없음: {args.weights}")
+
+    model = YOLO(args.weights)
     metrics = model.val(
-        data=str(YAML_PATH),
+        data=str(yaml_path),
         imgsz=args.imgsz,
         device=device,
         plots=True,
+        conf=args.conf,     # 고정 threshold
+        iou=args.iou,       # 고정 IoU
+        rect=True           # 종횡비 유지 검증
     )
-    # 간단 요약 출력
+    rd = getattr(metrics, "results_dict", {})
     summary = {
-        "precision": float(getattr(metrics, "box", {}).get("mp", getattr(metrics, "results_dict", {}).get("metrics/precision(B)", 0.0))),
-        "recall": float(getattr(metrics, "box", {}).get("mr", getattr(metrics, "results_dict", {}).get("metrics/recall(B)", 0.0))),
-        "mAP50": float(getattr(metrics, "box", {}).get("map50", getattr(metrics, "results_dict", {}).get("metrics/mAP50(B)", 0.0))),
-        "mAP50-95": float(getattr(metrics, "box", {}).get("map", getattr(metrics, "results_dict", {}).get("metrics/mAP50-95(B)", 0.0))),
+        "precision": float(rd.get("metrics/precision(B)", 0.0)),
+        "recall": float(rd.get("metrics/recall(B)", 0.0)),
+        "mAP50": float(rd.get("metrics/mAP50(B)", 0.0)),
+        "mAP50-95": float(rd.get("metrics/mAP50-95(B)", 0.0)),
     }
     print("[VAL]", json.dumps(summary, ensure_ascii=False, indent=2))
-    print("[OK] validation done.")
 
+def cmd_validate_sweep(args):
+    import csv
+    os.environ["WANDB_MODE"] = "disabled"
 
-def cmd_export(args):
-    ckpt = _resolve_weights(args)
-    model = YOLO(str(ckpt))
-    fmt = args.format  # 'onnx', 'engine', 'openvino', 'torchscript' 등
-    print(f"[INFO] export: weights={ckpt}, format={fmt}")
-    model.export(format=fmt, dynamic=args.dynamic, half=args.half, imgsz=args.imgsz)
-    print("[OK] export done.")
+    if args.data_dir:
+        yaml_path = make_yaml(Path(args.data_dir))
+    elif args.data_yaml:
+        yaml_path = args.data_yaml
+    else:
+        raise SystemExit("[ERR] --data-dir 또는 --data-yaml 중 하나 필요")
 
+    device = auto_device(args.device)
+    if not Path(args.weights).exists():
+        raise SystemExit(f"[ERR] weights 없음: {args.weights}")
 
-# ===== 메인 =====
+    model = YOLO(args.weights)
+    conf_list = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
+    rows = []
+    for c in conf_list:
+        m = model.val(data=str(yaml_path), imgsz=args.imgsz, device=device,
+                      plots=False, conf=c, iou=args.iou, rect=True)
+        rd = getattr(m, "results_dict", {})
+        rows.append({
+            "conf": c,
+            "precision": float(rd.get("metrics/precision(B)", 0.0)),
+            "recall": float(rd.get("metrics/recall(B)", 0.0)),
+            "mAP50": float(rd.get("metrics/mAP50(B)", 0.0)),
+            "mAP50-95": float(rd.get("metrics/mAP50-95(B)", 0.0)),
+        })
+    print("\nCONF |  PREC   | RECALL  |  mAP50  | mAP50-95")
+    for r in rows:
+        print(f"{r['conf']:.2f}  | {r['precision']:.4f} | {r['recall']:.4f} | {r['mAP50']:.4f} | {r['mAP50-95']:.4f}")
+    if args.out_csv:
+        out = Path(args.out_csv)
+        with out.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["conf","precision","recall","mAP50","mAP50-95"])
+            w.writeheader(); w.writerows(rows)
+        print(f"[OK] saved sweep csv -> {out}")
+
+# ==== 엔트리 ====
 def main():
-    ap = argparse.ArgumentParser(description="Robust trainer for night nose+mouth (small objects)")
+    ap = argparse.ArgumentParser("Night nose+mouth detector trainer")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    # prepare
-    ap_prep = sub.add_parser("prepare", help="YAML 생성 및 경로 점검")
-    ap_prep.set_defaults(func=cmd_prepare)
-
     # train
-    ap_tr = sub.add_parser("train", help="학습")
-    ap_tr.add_argument("--epochs", type=_natural_int, default=100)
-    ap_tr.add_argument("--batch", type=_natural_int, default=8)
-    ap_tr.add_argument("--imgsz", type=_natural_int, default=DEFAULT_IMGSZ)
-    ap_tr.add_argument("--device", default=DEFAULT_DEVICE)        # 'cpu' 또는 '0'
-    ap_tr.add_argument("--patience", type=int, default=20)
-    ap_tr.add_argument("--workers", type=int, default=2)
-    ap_tr.add_argument("--seed", type=int, default=0)
-    ap_tr.add_argument("--weights", default=None, help="시작 가중치(.pt 등)")
-    ap_tr.add_argument("--name", default=None, help="실행 이름(미지정 시 자동)")
-    ap_tr.set_defaults(func=cmd_train)
-
-    # resume
-    ap_rs = sub.add_parser("resume", help="이전 run 재개")
-    ap_rs.add_argument("--run-dir", required=True, help="예: runs/detect/night_smallobj-YYMMDD-HHMMSS")
-    ap_rs.add_argument("--device", default=DEFAULT_DEVICE)
-    ap_rs.set_defaults(func=cmd_resume)
+    tr = sub.add_parser("train")
+    tr.add_argument("--data-dir", required=True, help="데이터 루트( images/, labels/ 포함 폴더 )")
+    tr.add_argument("--epochs", type=int, default=100)
+    tr.add_argument("--batch", type=int, default=16)
+    tr.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
+    tr.add_argument("--device", default=None)   # 'cpu' or '0'
+    tr.add_argument("--patience", type=int, default=30)
+    tr.add_argument("--workers", type=int, default=2)
+    tr.add_argument("--seed", type=int, default=0)
+    tr.add_argument("--weights", default=None)
+    tr.add_argument("--name", default=None)
+    tr.add_argument("--strict-smallobj", action="store_true",
+                    help="소물체·야간 보수 프로파일(증강 최소화, multi_scale OFF)")
+    tr.set_defaults(func=cmd_train)
 
     # predict
-    ap_pr = sub.add_parser("predict", help="추론")
-    ap_pr.add_argument("--source", default=str(DATA_ROOT / "images/val"))
-    ap_pr.add_argument("--conf", type=float, default=0.2)
-    ap_pr.add_argument("--imgsz", type=_natural_int, default=DEFAULT_IMGSZ)
-    ap_pr.add_argument("--device", default=DEFAULT_DEVICE)
-    ap_pr.add_argument("--no-tta", action="store_true")
-    ap_pr.add_argument("--weights", default=None, help="사용할 가중치 경로(미지정 시 최신 run의 best/last 자동 탐색)")
-    ap_pr.set_defaults(func=cmd_predict)
+    pr = sub.add_parser("predict")
+    pr.add_argument("--weights", default=None, help="미지정 시 최근 run 자동 선택")
+    pr.add_argument("--source", required=True, help="파일/폴더/비디오/웹캠(0)")
+    pr.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
+    pr.add_argument("--conf", type=float, default=0.2)
+    pr.add_argument("--device", default=None)
+    pr.add_argument("--no-tta", action="store_true")
+    pr.set_defaults(func=cmd_predict)
 
     # validate
-    ap_va = sub.add_parser("validate", help="검증 및 지표 산출")
-    ap_va.add_argument("--imgsz", type=_natural_int, default=DEFAULT_IMGSZ)
-    ap_va.add_argument("--device", default=DEFAULT_DEVICE)
-    ap_va.add_argument("--weights", default=None)
-    ap_va.set_defaults(func=cmd_validate)
+    va = sub.add_parser("validate")
+    va.add_argument("--weights", required=True)
+    va.add_argument("--data-dir", default=None)
+    va.add_argument("--data-yaml", default=None)
+    va.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
+    va.add_argument("--device", default=None)
+    va.add_argument("--conf", type=float, default=0.25)
+    va.add_argument("--iou", type=float, default=0.5)
+    va.set_defaults(func=cmd_validate)
 
-    # export
-    ap_ex = sub.add_parser("export", help="가중치 내보내기")
-    ap_ex.add_argument("--format", default="onnx", help="onnx/engine/openvino/torchscript 등")
-    ap_ex.add_argument("--imgsz", type=_natural_int, default=DEFAULT_IMGSZ)
-    ap_ex.add_argument("--dynamic", action="store_true")
-    ap_ex.add_argument("--half", action="store_true")
-    ap_ex.add_argument("--weights", default=None)
-    ap_ex.set_defaults(func=cmd_export)
+    # validate-sweep
+    sw = sub.add_parser("validate-sweep")
+    sw.add_argument("--weights", required=True)
+    sw.add_argument("--data-dir", default=None)
+    sw.add_argument("--data-yaml", default=None)
+    sw.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
+    sw.add_argument("--device", default=None)
+    sw.add_argument("--iou", type=float, default=0.5)
+    sw.add_argument("--out-csv", default=None)
+    sw.set_defaults(func=cmd_validate_sweep)
 
     args = ap.parse_args()
     args.func(args)
-
 
 if __name__ == "__main__":
     main()
