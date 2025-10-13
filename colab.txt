@@ -1,0 +1,23 @@
+datasets 폴더에 이미지랑 라벨 분류해서 넣고
+드라이브에 학습 코드랑 datasets 폴더 넣고 돌리면 됩니다.
+
+#gpu 연결 확인
+!nvidia-smi
+
+#패키지 설치
+!pip -q install ultralytics opencv-python
+
+#드라이브랑 연동
+from google.colab import drive
+drive.mount('/content/drive')
+
+#학습 명령어
+%cd /content/drive/MyDrive
+!python n_model_tunning.py train \
+  --model yolo11s.pt \
+  --data datasets/night_face/night_face.yaml \
+  --epochs 150 \
+  --batch 16 \
+  --imgsz 960 \
+  --smallobj \
+  --name y11s_sobj_1280
