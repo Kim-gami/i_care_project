@@ -1,6 +1,8 @@
-path: datasets\night_face
+path: datasets/night_face
 train: images/train
 val: images/val
+nc: 3
 names:
-  0: nose_mouth
-nc: 1
+  - mouth
+  - nose
+  - pacifier
