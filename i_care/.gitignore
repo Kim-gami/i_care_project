@@ -30,7 +30,6 @@ env/
 weights/
 runs/
 outputs/
-*.engine
 *.onnx
 
 # =====================================
