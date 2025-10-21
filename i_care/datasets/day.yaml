@@ -1,0 +1,11 @@
+path: datasets/night_face
+train: images/train
+val: images/val
+nc: 6
+names:
+  - bottle_cap
+  - chopstick
+  - coin
+  - fork
+  - hand
+  - ring

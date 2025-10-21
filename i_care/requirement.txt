@@ -1,0 +1,5 @@
+python==3.8.10
+numpy
+opencv-python
+PyGObject
+python-telegram-bot>=20.0
